@@ -15,7 +15,6 @@ module Conticrystal
 
     getter id : Int32 | Int64
     getter type : String
-    getter date : Time
     getter from_id : String?
     getter forwarded_from : String?
     getter text_entities : Array(TextEntity)
@@ -57,11 +56,16 @@ module Conticrystal
       @chat_id = @parser.read_int
     end
 
-    def messages(start_after : Time?, &)
+    def messages(start_after : Int32 | Int64, &)
       @parser.read_object_key # messages
       @parser.read_array do
         message = Message.from_json @parser.read_raw
-        next if (start_after && (message.date <= start_after)) || message.type != "message" || !message.from_id || message.forwarded_from || message.text_entities.size == 0
+        next if message.id <= start_after
+        next if message.type != "message"
+        next if !message.from_id
+        next if !message.from_id.not_nil!.starts_with? "user"
+        next if message.forwarded_from
+        next if message.text_entities.size == 0
         message.chat_id = @chat_id
         yield message
       end
@@ -188,7 +192,7 @@ module Conticrystal
 
     include YAML::Serializable
 
-    property chats = {} of Int64 => Time
+    property chats = {} of Int64 => Int32 | Int64 # chat id => last processed message id
 
     def initialize
     end
@@ -203,16 +207,18 @@ module Conticrystal
     end
 
     def database(user_id : String)
-      @databases[user_id] = Database.new(user_id) if !@databases.includes? user_id
+      if !@databases.has_key? user_id
+        @databases[user_id] = Database.new(user_id)
+      end
       @databases[user_id]
     end
 
     def load
       Dump.unprocessed do |dump|
-        chat_version = @versions.chats[dump.chat_id]?
+        chat_version = @versions.chats[dump.chat_id]? || 0
         dump.messages chat_version do |message|
           database(message.from_id.not_nil!) << message
-          @versions.chats[dump.chat_id] = message.date
+          @versions.chats[dump.chat_id] = message.id
         end
         File.write Versions.path, @versions.to_yaml
         dump.mark_processed
