@@ -2,7 +2,7 @@ require "json"
 require "sqlite3"
 
 module Conticrystal
-  class Message
+  struct Message
     class TextEntity
       include JSON::Serializable
 
@@ -34,10 +34,18 @@ module Conticrystal
   end
 
   class Dump
+    class_property dir : Path
+    {% if flag?(:windows) %}
+      @@dir = Path.new("~", "AppData", "conticrystal").expand(home: true)
+    {% else %}
+      @@dir = Path.new("~", ".local", "share", "conticrystal").expand(home: true)
+    {% end %}
+
     getter chat_id : Int64
 
-    def initialize(path : Path)
-      @parser = JSON::PullParser.new File.new path
+    def initialize(@path : Path)
+      Dir.mkdir_p @@dir
+      @parser = JSON::PullParser.new File.new @path
       @parser.read_begin_object
       (1..2).each do # name, type
         @parser.read_object_key
@@ -54,6 +62,16 @@ module Conticrystal
         next if message.id <= start_after_id || message.type != "message" || !message.from_id || message.forwarded_from || message.text_entities.size == 0
         message.chat_id = @chat_id
         yield message
+      end
+    end
+
+    def mark_processed
+      File.rename @path, @path.to_s + ".pcd"
+    end
+
+    def self.unprocessed(&)
+      Dir.glob @@dir / "*.json" do |path|
+        yield Dump.new Path.new path
       end
     end
   end
@@ -77,7 +95,7 @@ module Conticrystal
       @db.exec "create table if not exists messages(" \
                "chat_id int not null," \
                "message_id int not null," \
-               "from_id int not null," \
+               "from_id text not null," \
                "unique(chat_id, message_id))"
       @db.exec "create index if not exists messages_from_id on messages(from_id)"
 
@@ -120,12 +138,52 @@ module Conticrystal
         prev = cur
       end
     end
+
+    def <<(dump : Dump)
+      dump.messages(last_message_id dump.chat_id) { |message| self.<< message }
+    end
+
+    def generate(from_id : String, amount : Int64)
+      end_len = 0
+      result = String.build do |sb|
+        prev = "."
+        (1..amount).each do |i|
+          if !(row = @db.query_one? "select wn.value, m.chat_id, m.message_id from words as wc join transitions as t " \
+                                    "join words as wn join transitions_messages as tm join messages as m " \
+                                    "on wc.value=? and t.current_word=wc.rowid and " \
+                                    "wn.rowid=t.next_word and tm.transition=t.rowid and m.rowid=tm.message and m.from_id=?" \
+                                    "order by random() limit 1", prev, from_id, as: {word: String, chat_id: Int64, message_id: Int64})
+            prev = "."
+            sb << "."
+            end_len = sb.bytesize
+            next
+          end
+          prev = row[:word]
+          sb << " " if (i > 1 && ![".", "!", "?", ",", ";", ":"].includes? prev)
+
+          link = "https://t.me/c/#{row[:chat_id]}/#{row[:message_id]}"
+          hyperlink = ([".", "-", "!"].includes? prev) ? "[\\#{prev}](#{link})" : "[#{prev}](#{link})"
+          sb << hyperlink
+
+          end_len = sb.bytesize if [".", "!", "?"].includes? prev
+        end
+      end
+      String.new result.to_slice[0, end_len]
+    end
+  end
+
+  class App
+    def initialize
+      @database = Conticrystal::Database.new
+    end
+
+    def run
+      Dump.unprocessed do |dump|
+        @database << dump
+        dump.mark_processed
+      end
+    end
   end
 end
 
-database = Conticrystal::Database.new
-
-dump = Conticrystal::Dump.new Path.new "/home/necheporenko_s_iu/repositories/dump.json"
-dump.messages(database.last_message_id(dump.chat_id)) do |message|
-  database << message
-end
+Conticrystal::App.new.run
