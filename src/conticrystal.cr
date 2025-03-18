@@ -1,3 +1,4 @@
+require "yaml"
 require "json"
 require "sqlite3"
 
@@ -14,6 +15,7 @@ module Conticrystal
 
     getter id : Int32 | Int64
     getter type : String
+    getter date : Time
     getter from_id : String?
     getter forwarded_from : String?
     getter text_entities : Array(TextEntity)
@@ -55,11 +57,11 @@ module Conticrystal
       @chat_id = @parser.read_int
     end
 
-    def messages(start_after_id : Int32 | Int64, &)
+    def messages(start_after : Time?, &)
       @parser.read_object_key # messages
       @parser.read_array do
         message = Message.from_json @parser.read_raw
-        next if message.id <= start_after_id || message.type != "message" || !message.from_id || message.forwarded_from || message.text_entities.size == 0
+        next if (start_after && (message.date <= start_after)) || message.type != "message" || !message.from_id || message.forwarded_from || message.text_entities.size == 0
         message.chat_id = @chat_id
         yield message
       end
@@ -77,27 +79,26 @@ module Conticrystal
   end
 
   class Database
-    class_property path : Path
+    class_property dir : Path
     {% if flag?(:windows) %}
-      @@path = Path.new("~", "AppData", "conticrystal", "db.db").expand(home: true)
+      @@dir = Path.new("~", "AppData", "conticrystal").expand(home: true)
     {% else %}
-      @@path = Path.new("~", ".config", "conticrystal", "db.db").expand(home: true)
+      @@dir = Path.new("~", ".local", "share", "conticrystal").expand(home: true)
     {% end %}
 
     @db : DB::Database
 
-    def initialize
-      Dir.mkdir_p @@path.parent
-      @db = DB.open "sqlite3://#{@@path}"
+    def initialize(user_id : String)
+      Dir.mkdir_p @@dir
+      path = @@dir / "#{user_id}.db"
+      @db = DB.open "sqlite3://#{path}"
       @db.exec "pragma synchronous=off"
       @db.exec "pragma locking_mode=exclusive"
       @db.exec "pragma journal_mode=memory"
       @db.exec "create table if not exists messages(" \
                "chat_id int not null," \
                "message_id int not null," \
-               "from_id text not null," \
                "unique(chat_id, message_id))"
-      @db.exec "create index if not exists messages_from_id on messages(from_id)"
 
       @db.exec "create table if not exists words(value text unique not null)"
       @db.exec "create unique index if not exists words_value on words(value)"
@@ -126,7 +127,7 @@ module Conticrystal
     end
 
     def <<(message : Message)
-      message_insert_result = @db.exec("insert or ignore into messages (chat_id, message_id, from_id) values (?, ?, ?)", message.chat_id, message.id, message.from_id)
+      message_insert_result = @db.exec("insert or ignore into messages (chat_id, message_id) values (?, ?)", message.chat_id, message.id)
       return if message_insert_result.rows_affected == 0 # message already exists
       prev = "."
       message.words do |cur|
@@ -139,11 +140,7 @@ module Conticrystal
       end
     end
 
-    def <<(dump : Dump)
-      dump.messages(last_message_id dump.chat_id) { |message| self.<< message }
-    end
-
-    def generate(from_id : String, amount : Int64)
+    def generate(amount : Int64)
       end_len = 0
       result = String.build do |sb|
         prev = "."
@@ -151,8 +148,8 @@ module Conticrystal
           if !(row = @db.query_one? "select wn.value, m.chat_id, m.message_id from words as wc join transitions as t " \
                                     "join words as wn join transitions_messages as tm join messages as m " \
                                     "on wc.value=? and t.current_word=wc.rowid and " \
-                                    "wn.rowid=t.next_word and tm.transition=t.rowid and m.rowid=tm.message and m.from_id=?" \
-                                    "order by random() limit 1", prev, from_id, as: {word: String, chat_id: Int64, message_id: Int64})
+                                    "wn.rowid=t.next_word and tm.transition=t.rowid and m.rowid=tm.message " \
+                                    "order by random() limit 1", prev, as: {word: String, chat_id: Int64, message_id: Int64})
             prev = "."
             sb << "."
             end_len = sb.bytesize
@@ -170,18 +167,60 @@ module Conticrystal
       end
       String.new result.to_slice[0, end_len]
     end
+
+    def self.all
+      result = {} of String => Database
+      Dir.glob @@dir / "*.db" do |path_s|
+        user_id = Path.new(path_s).stem
+        result[user_id] = Database.new user_id
+      end
+      result
+    end
+  end
+
+  class Versions
+    class_property path : Path
+    {% if flag?(:windows) %}
+      @@path = Path.new("~", "AppData", "conticrystal", "update.lock").expand(home: true)
+    {% else %}
+      @@path = Path.new("~", ".config", "conticrystal", "update.lock").expand(home: true)
+    {% end %}
+
+    include YAML::Serializable
+
+    property chats = {} of Int64 => Time
+
+    def initialize
+    end
   end
 
   class App
+    @databases = {} of String => Database
+    @versions : Versions
+
     def initialize
-      @database = Conticrystal::Database.new
+      @versions = Versions.from_yaml File.new Versions.path rescue Versions.new
+    end
+
+    def database(user_id : String)
+      @databases[user_id] = Database.new(user_id) if !@databases.includes? user_id
+      @databases[user_id]
+    end
+
+    def load
+      Dump.unprocessed do |dump|
+        chat_version = @versions.chats[dump.chat_id]?
+        dump.messages chat_version do |message|
+          database(message.from_id.not_nil!) << message
+          @versions.chats[dump.chat_id] = message.date
+        end
+        File.write Versions.path, @versions.to_yaml
+        dump.mark_processed
+      end
     end
 
     def run
-      Dump.unprocessed do |dump|
-        @database << dump
-        dump.mark_processed
-      end
+      load
     end
   end
 end
