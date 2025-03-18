@@ -110,14 +110,14 @@ module Conticrystal
     def <<(message : Message)
       message_insert_result = @db.exec("insert or ignore into messages (chat_id, message_id, from_id) values (?, ?, ?)", message.chat_id, message.id, message.from_id)
       return if message_insert_result.rows_affected == 0 # message already exists
-      m_rowid = message_insert_result.last_insert_id
       prev = "."
       message.words do |cur|
         @db.exec "insert or ignore into words (value) values (?)", cur
         t_rowid = @db.exec("insert into transitions (current_word, next_word)" \
                            "select c.rowid, n.rowid from words as c join words as n " \
                            "on c.value == ? and n.value == ?", prev, cur).last_insert_id
-        @db.exec "insert or ignore into transitions_messages (transition, message) values (?, ?)", t_rowid, m_rowid
+        @db.exec "insert or ignore into transitions_messages (transition, message) values (?, ?)", t_rowid, message_insert_result.last_insert_id
+        prev = cur
       end
     end
   end
