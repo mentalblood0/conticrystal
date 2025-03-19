@@ -209,6 +209,7 @@ module Conticrystal
         ANY
         CHOOSE
         MIX
+        CHOOSIX
       end
 
       include YAML::Serializable
@@ -235,10 +236,11 @@ module Conticrystal
         Dir.mkdir_p @@path.parent
         File.write @@path, "---
 generate:
-  type: ANY # ANY or CHOOSE or MIX
+  type: ANY # ANY or CHOOSE or MIX or CHOOSIX
             # ANY means one random user
             # CHOOSE means one random user from provided
             # MIX means random user from provided, for each word
+            # CHOOSIX means random user from two randomly chosen, for each word
             # for CHOOSE and MIX also provide 'users' key with users ids list (user id example is user123456789)
   amount: 100
 send:
@@ -277,6 +279,8 @@ send:
         @versions.save
         dump.mark_processed
       end
+      @databases.each_value &.close
+      @databases.clear
     end
 
     def generate(databases : Array(Database))
@@ -313,12 +317,13 @@ send:
     end
 
     def run
+      load
+
       if !Database.exists?
+        Dir.mkdir_p Database.dir
         puts "Put JSON files from telegram messages dumps at #{Database.dir} and try again, processed files will be moved to #{Database.dir / "processed"}"
         exit 1
       end
-
-      load
 
       text = case @config.generate.type
              when Config::Generation::Type::ANY
@@ -327,6 +332,8 @@ send:
                generate [Database.new @config.generate.users.sample]
              when Config::Generation::Type::MIX
                generate @config.generate.users.map { |user_id| Database.new user_id }
+             when Config::Generation::Type::CHOOSIX
+               generate (0..1).map { @config.generate.users.sample }.map { |user_id| Database.new user_id }
              else
                raise "don't know how to handle #{@config.generate.type}"
              end
