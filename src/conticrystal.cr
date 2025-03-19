@@ -151,6 +151,10 @@ module Conticrystal
                      "order by random() limit 1", prev, as: {word: String, chat_id: Int64, message_id: Int64}
     end
 
+    def self.exists?
+      Dir.glob(@@dir / "*.db").size > 0
+    end
+
     def self.random
       Database.new Path.new(Dir.glob(@@dir / "*.db").sample).stem
     end
@@ -226,7 +230,8 @@ module Conticrystal
     getter send : Sending
 
     def self.load
-      File.write @@path, "---
+      if !File.exists? @@path
+        File.write @@path, "---
 generate:
   type: ANY # ANY or CHOOSE or MIX
             # ANY means one random user
@@ -236,7 +241,9 @@ generate:
   amount: 100
 send:
   token: # telegram bot token
-  chat_id: # telegram chat id, e.g. \"-1234567890123\"" if !File.exists? @@path
+  chat_id: # telegram chat id, e.g. \"-1234567890123\""
+        puts "Created default config at #{@@path}"
+      end
       Config.from_yaml File.new @@path
     end
   end
@@ -278,7 +285,7 @@ send:
         loop do
           if !(row = databases.sample.generate prev)
             prev = "."
-            sb << "\\."
+            sb << "\\." if i > 0
             end_len = sb.bytesize
             next
           end
@@ -304,6 +311,11 @@ send:
     end
 
     def run
+      if !Database.exists?
+        puts "Put JSON files from telegram messages dumps at #{Database.dir} and try again, processed files will be moved to #{Database.dir / "processed"}"
+        exit 1
+      end
+
       load
 
       text = case @config.generate.type
