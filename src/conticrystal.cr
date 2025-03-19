@@ -333,7 +333,7 @@ send:
              when Config::Generation::Type::MIX
                generate @config.generate.users.map { |user_id| Database.new user_id }
              when Config::Generation::Type::CHOOSIX
-               @config.generate.users.sample(2).map { |user_id| Database.new user_id }
+               generate @config.generate.users.sample(2).map { |user_id| Database.new user_id }
              else
                raise "don't know how to handle #{@config.generate.type}"
              end
