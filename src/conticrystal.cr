@@ -192,6 +192,7 @@ module Conticrystal
     end
 
     def save
+      Dir.mkdir_p @@path.parent
       File.write @@path, self.to_yaml
     end
   end
@@ -231,6 +232,7 @@ module Conticrystal
 
     def self.load
       if !File.exists? @@path
+        Dir.mkdir_p @@path.parent
         File.write @@path, "---
 generate:
   type: ANY # ANY or CHOOSE or MIX
