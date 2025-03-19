@@ -159,7 +159,7 @@ module Conticrystal
       Database.new Path.new(Dir.glob(@@dir / "*.db").sample).stem
     end
 
-    def finalize
+    def close
       @db.close
     end
   end
@@ -262,7 +262,7 @@ send:
               begin
                 @databases[user_id] = Database.new(user_id)
               rescue # too many file descriptors used => clear cache
-                @databases.each_value &.finalize
+                @databases.each_value &.close
                 @databases.clear
                 @databases[user_id] = Database.new(user_id)
               end
