@@ -36,7 +36,7 @@ module Conticrystal
   end
 
   class Dump
-    class_property dir : Path
+    class_getter dir : Path
     {% if flag?(:windows) %}
       @@dir = Path.new("~", "AppData", "conticrystal").expand(home: true)
     {% else %}
@@ -73,7 +73,9 @@ module Conticrystal
     end
 
     def mark_processed
-      File.rename @path, @path.to_s + ".pcd"
+      new_path = Path.new @path.to_s + ".pcd"
+      File.rename @path, new_path
+      @path = new_path
     end
 
     def self.unprocessed(&)
@@ -84,7 +86,7 @@ module Conticrystal
   end
 
   class Database
-    class_property dir : Path
+    class_getter dir : Path
     {% if flag?(:windows) %}
       @@dir = Path.new("~", "AppData", "conticrystal").expand(home: true)
     {% else %}
@@ -126,11 +128,6 @@ module Conticrystal
       @db.exec "create index if not exists transitions_messages_transition on transitions_messages(transition)"
     end
 
-    def last_message_id(chat_id : Int64)
-      result = @db.scalar("select max(message_id) from messages where chat_id=?", chat_id)
-      result ? result.as(Int64) : 0
-    end
-
     def <<(message : Message)
       message_insert_result = @db.exec("insert or ignore into messages (chat_id, message_id) values (?, ?)", message.chat_id, message.id)
       return if message_insert_result.rows_affected == 0 # message already exists
@@ -143,10 +140,6 @@ module Conticrystal
         @db.exec "insert or ignore into transitions_messages (transition, message) values (?, ?)", t_rowid, message_insert_result.last_insert_id
         prev = cur
       end
-    end
-
-    def is_punctuation(word : String)
-      [".", "!", "?", ",", ";", ":", "-", "—"].includes? word
     end
 
     def generate(amount : Int64)
@@ -169,7 +162,7 @@ module Conticrystal
 
           escaped = [".", "-", "!"].includes?(prev) ? "\\#{prev}" : prev
 
-          if is_punctuation prev
+          if [".", "!", "?", ",", ";", ":", "-", "—"].includes? prev
             sb << escaped
           else
             sb << " " if i > 0
@@ -191,7 +184,7 @@ module Conticrystal
   end
 
   class Versions
-    class_property path : Path
+    class_getter path : Path
     {% if flag?(:windows) %}
       @@path = Path.new("~", "AppData", "conticrystal", "update.lock").expand(home: true)
     {% else %}
@@ -200,9 +193,25 @@ module Conticrystal
 
     include YAML::Serializable
 
-    property chats = {} of Int64 => Int32 | Int64 # chat id => last processed message id
+    @chats = {} of Int64 => Int32 | Int64 # chat id => last processed message id
 
     def initialize
+    end
+
+    def self.load
+      Versions.from_yaml File.new Versions.path rescue Versions.new
+    end
+
+    def [](chat_id : Int64)
+      @chats[chat_id]? || 0
+    end
+
+    def <<(message : Message)
+      @chats[message.chat_id] = message.id
+    end
+
+    def save
+      File.write @@path, self.to_yaml
     end
   end
 
@@ -239,12 +248,8 @@ module Conticrystal
 
   class App
     @databases = {} of String => Database
-    @versions : Versions
-
-    def initialize
-      @versions = Versions.from_yaml File.new Versions.path rescue Versions.new
-      @config = Config.load
-    end
+    @versions : Versions = Versions.load
+    @config : Config = Config.load
 
     def database(user_id : String)
       if !@databases.has_key? user_id
@@ -255,10 +260,9 @@ module Conticrystal
 
     def load
       Dump.unprocessed do |dump|
-        chat_version = @versions.chats[dump.chat_id]? || 0
-        dump.messages chat_version do |message|
+        dump.messages @versions[dump.chat_id] do |message|
           database(message.from_id.not_nil!) << message
-          @versions.chats[dump.chat_id] = message.id
+          @versions << message
         end
         File.write Versions.path, @versions.to_yaml
         dump.mark_processed
