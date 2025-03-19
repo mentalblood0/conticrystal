@@ -1,3 +1,4 @@
+require "http/client"
 require "yaml"
 require "json"
 require "sqlite3"
@@ -144,11 +145,16 @@ module Conticrystal
       end
     end
 
+    def is_punctuation(word : String)
+      [".", "!", "?", ",", ";", ":", "-", "—"].includes? word
+    end
+
     def generate(amount : Int64)
       end_len = 0
       result = String.build do |sb|
         prev = "."
-        (1..amount).each do |i|
+        i = 0
+        loop do
           if !(row = @db.query_one? "select wn.value, m.chat_id, m.message_id from words as wc join transitions as t " \
                                     "join words as wn join transitions_messages as tm join messages as m " \
                                     "on wc.value=? and t.current_word=wc.rowid and " \
@@ -160,11 +166,18 @@ module Conticrystal
             next
           end
           prev = row[:word]
-          sb << " " if (i > 1 && ![".", "!", "?", ",", ";", ":"].includes? prev)
 
-          link = "https://t.me/c/#{row[:chat_id]}/#{row[:message_id]}"
-          hyperlink = ([".", "-", "!"].includes? prev) ? "[\\#{prev}](#{link})" : "[#{prev}](#{link})"
-          sb << hyperlink
+          escaped = [".", "-", "!"].includes?(prev) ? "\\#{prev}" : prev
+
+          if is_punctuation prev
+            sb << escaped
+          else
+            sb << " " if i > 0
+            sb << "[#{escaped}](https://t.me/c/#{row[:chat_id]}/#{row[:message_id]})"
+
+            i += 1
+            break if i == amount
+          end
 
           end_len = sb.bytesize if [".", "!", "?"].includes? prev
         end
@@ -172,13 +185,8 @@ module Conticrystal
       String.new result.to_slice[0, end_len]
     end
 
-    def self.all
-      result = {} of String => Database
-      Dir.glob @@dir / "*.db" do |path_s|
-        user_id = Path.new(path_s).stem
-        result[user_id] = Database.new user_id
-      end
-      result
+    def self.random
+      Database.new Path.new(Dir.glob(@@dir / "*.db").sample).stem
     end
   end
 
@@ -198,12 +206,44 @@ module Conticrystal
     end
   end
 
+  class Config
+    {% if flag?(:windows) %}
+      @@path = Path.new("~", "AppData", "conticrystal", "config.yml").expand(home: true)
+    {% else %}
+      @@path = Path.new("~", ".config", "conticrystal", "config.yml").expand(home: true)
+    {% end %}
+
+    class Generation
+      include YAML::Serializable
+
+      getter user_id : String
+      getter amount : Int64
+    end
+
+    class Sending
+      include YAML::Serializable
+
+      getter token : String
+      getter chat_id : String
+    end
+
+    include YAML::Serializable
+
+    getter generate : Generation
+    getter send : Sending
+
+    def self.load
+      Config.from_yaml File.new @@path
+    end
+  end
+
   class App
     @databases = {} of String => Database
     @versions : Versions
 
     def initialize
       @versions = Versions.from_yaml File.new Versions.path rescue Versions.new
+      @config = Config.load
     end
 
     def database(user_id : String)
@@ -227,6 +267,22 @@ module Conticrystal
 
     def run
       load
+
+      db = @config.generate.user_id == "random" ? Database.random : Database.new(@config.generate.user_id)
+      text = db.generate @config.generate.amount
+
+      io = IO::Memory.new
+      builder = HTTP::FormData::Builder.new io
+      builder.field "chat_id", @config.send.chat_id
+      builder.field "text", text
+      builder.field "parse_mode", "MarkdownV2"
+      builder.finish
+      body = io.to_s
+      headers = HTTP::Headers{"Content-Type" => builder.content_type}
+
+      while !(HTTP::Client.post "https://api.telegram.org/bot#{@config.send.token}/sendMessage", headers: headers, body: body).success?
+        sleep 1.seconds
+      end
     end
   end
 end
