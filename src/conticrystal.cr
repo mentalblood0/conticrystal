@@ -163,6 +163,7 @@ module Conticrystal
           escaped = [".", "-", "!"].includes?(prev) ? "\\#{prev}" : prev
 
           if [".", "!", "?", ",", ";", ":", "-", "—"].includes? prev
+            sb << " " if prev == "—"
             sb << escaped
           else
             sb << " " if i > 0
