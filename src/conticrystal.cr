@@ -188,7 +188,7 @@ module Conticrystal
     {% if flag?(:windows) %}
       @@path = Path.new("~", "AppData", "conticrystal", "update.lock").expand(home: true)
     {% else %}
-      @@path = Path.new("~", ".config", "conticrystal", "update.lock").expand(home: true)
+      @@path = Path.new("~", ".local", "share", "conticrystal", "update.lock").expand(home: true)
     {% end %}
 
     include YAML::Serializable
