@@ -226,6 +226,17 @@ module Conticrystal
     getter send : Sending
 
     def self.load
+      File.write @@path, "---
+generate:
+  type: ANY # ANY or CHOOSE or MIX
+            # ANY means one random user
+            # CHOOSE means one random user from provided
+            # MIX means random user from provided, for each word
+            # for CHOOSE and MIX also provide 'users' key with users ids list (user id example is user123456789)
+  amount: 100
+send:
+  token: # telegram bot token
+  chat_id: # telegram chat id, e.g. \"-1234567890123\"" if !File.exists? @@path
       Config.from_yaml File.new @@path
     end
   end

@@ -11,5 +11,5 @@ shards build --production --release
 ## Usage
 
 ```bash
-./bin/podcaster
+./bin/conticrystal
 ```
