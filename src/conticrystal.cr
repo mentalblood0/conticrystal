@@ -73,7 +73,8 @@ module Conticrystal
     end
 
     def mark_processed
-      new_path = Path.new @path.to_s + ".pcd"
+      new_path = @path.parent / "processed" / @path.basename
+      Dir.mkdir_p new_path.parent
       File.rename @path, new_path
       @path = new_path
     end
@@ -142,45 +143,20 @@ module Conticrystal
       end
     end
 
-    def generate(amount : Int64)
-      end_len = 0
-      result = String.build do |sb|
-        prev = "."
-        i = 0
-        loop do
-          if !(row = @db.query_one? "select wn.value, m.chat_id, m.message_id from words as wc join transitions as t " \
-                                    "join words as wn join transitions_messages as tm join messages as m " \
-                                    "on wc.value=? and t.current_word=wc.rowid and " \
-                                    "wn.rowid=t.next_word and tm.transition=t.rowid and m.rowid=tm.message " \
-                                    "order by random() limit 1", prev, as: {word: String, chat_id: Int64, message_id: Int64})
-            prev = "."
-            sb << "."
-            end_len = sb.bytesize
-            next
-          end
-          prev = row[:word]
-
-          escaped = [".", "-", "!"].includes?(prev) ? "\\#{prev}" : prev
-
-          if [".", "!", "?", ",", ";", ":", "-", "—"].includes? prev
-            sb << " " if prev == "—"
-            sb << escaped
-          else
-            sb << " " if i > 0
-            sb << "[#{escaped}](https://t.me/c/#{row[:chat_id]}/#{row[:message_id]})"
-
-            i += 1
-            break if i == amount
-          end
-
-          end_len = sb.bytesize if [".", "!", "?"].includes? prev
-        end
-      end
-      String.new result.to_slice[0, end_len]
+    def generate(prev : String)
+      @db.query_one? "select wn.value, m.chat_id, m.message_id from words as wc join transitions as t " \
+                     "join words as wn join transitions_messages as tm join messages as m " \
+                     "on wc.value=? and t.current_word=wc.rowid and " \
+                     "wn.rowid=t.next_word and tm.transition=t.rowid and m.rowid=tm.message " \
+                     "order by random() limit 1", prev, as: {word: String, chat_id: Int64, message_id: Int64}
     end
 
     def self.random
       Database.new Path.new(Dir.glob(@@dir / "*.db").sample).stem
+    end
+
+    def finalize
+      @db.close
     end
   end
 
@@ -224,9 +200,16 @@ module Conticrystal
     {% end %}
 
     class Generation
+      enum Type
+        ANY
+        CHOOSE
+        MIX
+      end
+
       include YAML::Serializable
 
-      getter user_id : String
+      getter type : Type
+      getter users = [] of String
       getter amount : Int64
     end
 
@@ -252,29 +235,76 @@ module Conticrystal
     @versions : Versions = Versions.load
     @config : Config = Config.load
 
-    def database(user_id : String)
-      if !@databases.has_key? user_id
-        @databases[user_id] = Database.new(user_id)
-      end
-      @databases[user_id]
-    end
-
     def load
       Dump.unprocessed do |dump|
         dump.messages @versions[dump.chat_id] do |message|
-          database(message.from_id.not_nil!) << message
+          user_id = message.from_id.not_nil!
+          database = begin
+            if !@databases.has_key? user_id
+              begin
+                @databases[user_id] = Database.new(user_id)
+              rescue # too many file descriptors used => clear cache
+                @databases.each_value &.finalize
+                @databases.clear
+                @databases[user_id] = Database.new(user_id)
+              end
+            end
+            @databases[user_id]
+          end
+          database << message
           @versions << message
         end
-        File.write Versions.path, @versions.to_yaml
+        @versions.save
         dump.mark_processed
       end
+    end
+
+    def generate(databases : Array(Database))
+      end_len = 0
+      result = String.build do |sb|
+        prev = "."
+        i = 0
+        loop do
+          if !(row = databases.sample.generate prev)
+            prev = "."
+            sb << "\\."
+            end_len = sb.bytesize
+            next
+          end
+          prev = row[:word]
+
+          escaped = [".", "-", "!"].includes?(prev) ? "\\#{prev}" : prev
+
+          if [".", "!", "?", ",", ";", ":", "-", "—"].includes? prev
+            sb << " " if prev == "—" || prev == "-"
+            sb << escaped
+          else
+            sb << " " if i > 0
+            sb << "[#{escaped}](https://t.me/c/#{row[:chat_id]}/#{row[:message_id]})"
+
+            i += 1
+            break if i == @config.generate.amount
+          end
+
+          end_len = sb.bytesize if [".", "!", "?"].includes? prev
+        end
+      end
+      String.new result.to_slice[0, end_len]
     end
 
     def run
       load
 
-      db = @config.generate.user_id == "random" ? Database.random : Database.new(@config.generate.user_id)
-      text = db.generate @config.generate.amount
+      text = case @config.generate.type
+             when Config::Generation::Type::ANY
+               generate [Database.random]
+             when Config::Generation::Type::CHOOSE
+               generate [Database.new @config.generate.users.sample]
+             when Config::Generation::Type::MIX
+               generate @config.generate.users.map { |user_id| Database.new user_id }
+             else
+               raise "don't know how to handle #{@config.generate.type}"
+             end
 
       io = IO::Memory.new
       builder = HTTP::FormData::Builder.new io
@@ -285,7 +315,9 @@ module Conticrystal
       body = io.to_s
       headers = HTTP::Headers{"Content-Type" => builder.content_type}
 
-      while !(HTTP::Client.post "https://api.telegram.org/bot#{@config.send.token}/sendMessage", headers: headers, body: body).success?
+      loop do
+        response = HTTP::Client.post "https://api.telegram.org/bot#{@config.send.token}/sendMessage", headers: headers, body: body
+        break if response.success?
         sleep 1.seconds
       end
     end
