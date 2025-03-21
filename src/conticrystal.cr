@@ -25,10 +25,10 @@ module Conticrystal
 
     def words(&)
       last_is_punctuation = false
-      @text_entities.each do |te|
-        te.text.gsub(/\n+/, '.').scan(/[A-Za-zА-Яа-яЁ-ё]+|\.|!|\?|;|,|-|—|:/) do |md|
-          yield md.to_s
-          last_is_punctuation = [".", "!", "?"].includes? md.to_s
+      @text_entities.each do |entity|
+        entity.text.gsub(/\n+/, '.').scan(/[A-Za-zА-Яа-яЁ-ё]+|\.|!|\?|;|,|-|—|:/) do |match|
+          yield match.to_s
+          last_is_punctuation = [".", "!", "?"].includes? match.to_s
         end
       end
       yield "." if !last_is_punctuation
@@ -64,7 +64,7 @@ module Conticrystal
         next if message.id <= start_after
         next if message.type != "message"
         next if !message.from_id
-        next if !message.from_id.not_nil!.starts_with? "user"
+        next if !message.from_id.as(String).starts_with? "user"
         next if message.forwarded_from
         next if message.text_entities.size == 0
         message.chat_id = @chat_id
@@ -193,7 +193,7 @@ module Conticrystal
 
     def save
       Dir.mkdir_p @@path.parent
-      File.write @@path, self.to_yaml
+      File.write @@path, to_yaml
     end
   end
 
@@ -260,7 +260,7 @@ send:
     def load
       Dump.unprocessed do |dump|
         dump.messages @versions[dump.chat_id] do |message|
-          user_id = message.from_id.not_nil!
+          user_id = message.from_id.as String
           database = begin
             if !@databases.has_key? user_id
               begin
@@ -285,14 +285,14 @@ send:
 
     def generate(databases : Array(Database))
       end_len = 0
-      result = String.build do |sb|
+      result = String.build do |stream|
         prev = "."
         i = 0
         loop do
           if !(row = databases.sample.generate prev)
             prev = "."
-            sb << "\\." if i > 0
-            end_len = sb.bytesize
+            stream << "\\." if i > 0
+            end_len = stream.bytesize
             next
           end
           prev = row[:word]
@@ -300,17 +300,17 @@ send:
           escaped = [".", "-", "!"].includes?(prev) ? "\\#{prev}" : prev
 
           if [".", "!", "?", ",", ";", ":", "-", "—"].includes? prev
-            sb << " " if prev == "—" || prev == "-"
-            sb << escaped
+            stream << " " if prev == "—" || prev == "-"
+            stream << escaped
           else
-            sb << " " if i > 0
-            sb << "[#{escaped}](https://t.me/c/#{row[:chat_id]}/#{row[:message_id]})"
+            stream << " " if i > 0
+            stream << "[#{escaped}](https://t.me/c/#{row[:chat_id]}/#{row[:message_id]})"
 
             i += 1
             break if i == @config.generate.amount
           end
 
-          end_len = sb.bytesize if [".", "!", "?"].includes? prev
+          end_len = stream.bytesize if [".", "!", "?"].includes? prev
         end
       end
       String.new result.to_slice[0, end_len]
